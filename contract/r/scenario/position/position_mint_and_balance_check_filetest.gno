@@ -1,0 +1,257 @@
+// position mint and balance check
+
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"testing"
+	"time"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+
+	"gno.land/r/gnoswap/pool"
+	"gno.land/r/gnoswap/position"
+
+	"gno.land/r/gnoland/wugnot"
+	"gno.land/r/gnoswap/gns"
+)
+
+const (
+	INT64_MAX   int64   = 9223372036854775807
+	WUGNOT_ADDR address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+)
+
+var (
+	adminAddr, _  = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm    = testing.NewUserRealm(adminAddr)
+	poolAddr, _   = access.GetAddress(prbac.ROLE_POOL.String())
+	routerAddr, _ = access.GetAddress(prbac.ROLE_ROUTER.String())
+	routerRealm   = testing.NewUserRealm(routerAddr)
+
+	aliceAddr  = testutils.TestAddress("alice")
+	aliceRealm = testing.NewUserRealm(aliceAddr)
+	bobAddr    = testutils.TestAddress("bob")
+	bobRealm   = testing.NewUserRealm(bobAddr)
+
+	token0Path = "gno.land/r/gnoland/wugnot"
+	token1Path = "gno.land/r/gnoswap/gns"
+	fee        = uint32(3000)
+)
+
+func main() {
+	ufmt.Println("[SCENARIO] 1. Initialize tokens and pool")
+	initTokensAndPool()
+
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 3000000000000}})
+
+	wugnot.Deposit(cross)
+	testing.SetOriginSend(chain.Coins{})
+
+	initTokensAndPoolPostDeposit()
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint first position with Alice")
+	mintAlicePosition()
+	println()
+
+	ufmt.Println("[SCENARIO] 3. Mint second position with Bob")
+	mintBobPosition()
+	println()
+
+	ufmt.Println("[SCENARIO] 4. Check pool balances")
+	checkPoolBalances()
+	println()
+
+	ufmt.Println("[SCENARIO] 5. Compare position balances")
+	comparePositionBalances()
+	println()
+}
+
+func initTokensAndPool() {
+	testing.SetRealm(adminRealm)
+
+	defaultTokenAmount := int64(1000000000000)
+
+	ufmt.Println("[INFO] Distributing GNS tokens")
+	gns.Transfer(cross, aliceAddr, defaultTokenAmount)
+	gns.Transfer(cross, bobAddr, defaultTokenAmount)
+
+	ufmt.Println("[INFO] Distributing WUGNOT tokens")
+
+	mintedGnotCoin := chain.Coins{{"ugnot", 100000000000000}}
+
+	testing.IssueCoins(adminAddr, mintedGnotCoin)
+
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend)
+	banker_.SendCoins(adminAddr, WUGNOT_ADDR, chain.Coins{{"ugnot", defaultTokenAmount * 3}})
+}
+
+func initTokensAndPoolPostDeposit() {
+	testing.SetRealm(adminRealm)
+
+	defaultTokenAmount := int64(1000000000000)
+	distributedGnotCoin := chain.Coins{{"ugnot", defaultTokenAmount}}
+
+	wugnot.Transfer(cross, aliceAddr, defaultTokenAmount)
+	wugnot.Transfer(cross, bobAddr, defaultTokenAmount)
+
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend)
+	banker_.SendCoins(adminAddr, WUGNOT_ADDR, distributedGnotCoin)
+	banker_.SendCoins(adminAddr, aliceAddr, distributedGnotCoin)
+	banker_.SendCoins(adminAddr, bobAddr, distributedGnotCoin)
+
+	wugnot.Approve(cross, poolAddr, INT64_MAX)
+	gns.Approve(cross, poolAddr, INT64_MAX)
+
+	ufmt.Printf("[INFO] Initial GNS balance of Alice: %d\n", gns.BalanceOf(aliceAddr))
+	ufmt.Printf("[INFO] Initial GNS balance of Bob: %d\n", gns.BalanceOf(bobAddr))
+	ufmt.Printf("[INFO] Initial WUGNOT balance of Alice: %d\n", wugnot.BalanceOf(aliceAddr))
+	ufmt.Printf("[INFO] Initial WUGNOT balance of Bob: %d\n", wugnot.BalanceOf(bobAddr))
+
+	ufmt.Printf("[INFO] Creating %s:%s:%d pool (tick: %d)\n", token0Path, token1Path, fee, 1)
+	pool.CreatePool(
+		cross,
+		token0Path,
+		token1Path,
+		fee,
+		common.TickMathGetSqrtRatioAtTick(1).ToString(),
+	)
+}
+
+func mintAlicePosition() {
+	testing.SetRealm(aliceRealm)
+	wugnot.Approve(cross, poolAddr, INT64_MAX)
+	gns.Approve(cross, poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Minting position for Alice")
+	testing.SetOriginSend(chain.Coins{})
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross,
+		token0Path,
+		token1Path,
+		fee,
+		-6960,
+		6960,
+		"50000000",
+		"50000000",
+		"0",
+		"0",
+		time.Now().Unix()+3600,
+		aliceAddr,
+		aliceAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func mintBobPosition() {
+	testing.SetRealm(bobRealm)
+	wugnot.Approve(cross, poolAddr, INT64_MAX)
+	gns.Approve(cross, poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Minting position for Bob")
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross,
+		token0Path,
+		token1Path,
+		fee,
+		-2160,
+		11760,
+		"99999999",
+		"23027406",
+		"0",
+		"0",
+		time.Now().Unix()+3600,
+		bobAddr,
+		bobAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func checkPoolBalances() {
+	testing.SetRealm(adminRealm)
+
+	ufmt.Println("[INFO] Checking pool balances")
+	poolInfo, _ := pool.GetPool(token0Path, token1Path, fee)
+
+	ufmt.Printf("[EXPECTED] Pool token0 balance should be %s\n", poolInfo.BalanceToken0().ToString())
+	ufmt.Printf("[EXPECTED] Pool token1 balance should be %s\n", poolInfo.BalanceToken1().ToString())
+	ufmt.Printf("[EXPECTED] Pool liquidity should be %s\n", poolInfo.Liquidity().ToString())
+}
+
+func comparePositionBalances() {
+	testing.SetRealm(adminRealm)
+
+	ufmt.Println("[INFO] Comparing position balances")
+	pos1, _ := position.GetPosition(1)
+	pos2, _ := position.GetPosition(2)
+
+	ufmt.Printf("[EXPECTED] Position 1 token0 balance should be %s\n", pos1.Token0Balance().ToString())
+	ufmt.Printf("[EXPECTED] Position 1 token1 balance should be %s\n", pos1.Token1Balance().ToString())
+	ufmt.Printf("[EXPECTED] Position 2 token0 balance should be %s\n", pos2.Token0Balance().ToString())
+	ufmt.Printf("[EXPECTED] Position 2 token1 balance should be %s\n", pos2.Token1Balance().ToString())
+	ufmt.Printf("[EXPECTED] Sum of positions should match pool balances\n")
+}
+
+// Output:
+// [SCENARIO] 1. Initialize tokens and pool
+// [INFO] Distributing GNS tokens
+// [INFO] Distributing WUGNOT tokens
+// [INFO] Initial GNS balance of Alice: 1000000000000
+// [INFO] Initial GNS balance of Bob: 1000000000000
+// [INFO] Initial WUGNOT balance of Alice: 1000000000000
+// [INFO] Initial WUGNOT balance of Bob: 1000000000000
+// [INFO] Creating gno.land/r/gnoland/wugnot:gno.land/r/gnoswap/gns:3000 pool (tick: 1)
+//
+// [SCENARIO] 2. Mint first position with Alice
+// [INFO] Minting position for Alice
+// [EXPECTED] Position ID should be 1
+// [EXPECTED] Liquidity should be 170103415
+// [EXPECTED] Amount0 should be 49982991
+// [EXPECTED] Amount1 should be 50000000
+//
+// [SCENARIO] 3. Mint second position with Bob
+// [INFO] Minting position for Bob
+// [EXPECTED] Position ID should be 2
+// [EXPECTED] Liquidity should be 224838465
+// [EXPECTED] Amount0 should be 99939940
+// [EXPECTED] Amount1 should be 23027406
+//
+// [SCENARIO] 4. Check pool balances
+// [INFO] Checking pool balances
+// [EXPECTED] Pool token0 balance should be 149922931
+// [EXPECTED] Pool token1 balance should be 73027406
+// [EXPECTED] Pool liquidity should be 394941880
+//
+// [SCENARIO] 5. Compare position balances
+// [INFO] Comparing position balances
+// [EXPECTED] Position 1 token0 balance should be 49982991
+// [EXPECTED] Position 1 token1 balance should be 50000000
+// [EXPECTED] Position 2 token0 balance should be 99939940
+// [EXPECTED] Position 2 token1 balance should be 23027406
+// [EXPECTED] Sum of positions should match pool balances

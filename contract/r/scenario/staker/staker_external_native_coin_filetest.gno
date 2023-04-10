@@ -1,0 +1,346 @@
+// staker external native coin incentive scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"strconv"
+	"testing"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/common"
+
+	"gno.land/r/gnoland/wugnot"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	wugnotAddr address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+
+	barPath = "gno.land/r/onbloc/bar"
+	bazPath = "gno.land/r/onbloc/baz"
+
+	gnsPath    = "gno.land/r/gnoswap/gns"
+	wugnotPath = "gno.land/r/gnoland/wugnot"
+
+	fee100 uint32 = 100
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+
+	// external incentive deposit fee
+	depositGnsAmount int64 = 1_000_000_000 // 1_000 GNS
+
+	TIMESTAMP_90DAYS int64 = 90 * 24 * 60 * 60
+)
+
+func main() {
+	println("[SCENARIO] 1. Initialize and setup")
+	initAndSetup()
+	println()
+
+	println("[SCENARIO] 2. Create bar:baz:100 pool")
+	createPool()
+	println()
+
+	println("[SCENARIO] 3. Mint position 01")
+	mintPosition01()
+	println()
+
+	println("[SCENARIO] 4. Create external incentive with native coin (ugnot)")
+	// Deposit must be called from main() due to AssertOriginCall frame limit
+	testing.IssueCoins(adminAddr, chain.Coins{{"ugnot", 100_000_000_000_000}})
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 1_000_000_000}})
+	wugnot.Deposit(cross)
+	testing.SetOriginSend(chain.Coins{})
+	createExternalIncentiveWithNativeCoin()
+	println()
+
+	println("[SCENARIO] 5. Stake token 01")
+	stakeToken01()
+	println()
+
+	println("[SCENARIO] 6. Collect external reward with unwrap")
+	collectExternalRewardWithUnwrap()
+	println()
+
+	println("[SCENARIO] 7. Collect external reward without unwrap")
+	collectExternalRewardWithoutUnwrap()
+}
+
+func initAndSetup() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross, 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross, 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve gns for pool creation")
+	gns.Approve(cross, poolAddr, pl.GetPoolCreationFee())
+
+	println("[INFO] create bar:baz:100 pool")
+	pl.CreatePool(cross, barPath, bazPath, 100, common.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	testing.SkipHeights(1)
+}
+
+func mintPosition01() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for minting")
+	bar.Approve(cross, poolAddr, maxInt64)
+	baz.Approve(cross, poolAddr, maxInt64)
+	testing.SkipHeights(2)
+
+	println("[INFO] mint position 01 (tick range: -1000 ~ 1000)")
+	positionId, liquidity, amount0, amount1 := pn.Mint(
+		cross,
+		barPath,
+		bazPath,
+		fee100,
+		int32(-1000),
+		int32(1000),
+		"100000",
+		"100000",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position ID: %d\n", positionId)
+	ufmt.Printf("[EXPECTED] liquidity: %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] amount0: %s, amount1: %s\n", amount0, amount1)
+
+	testing.SkipHeights(1)
+}
+
+func createExternalIncentiveWithNativeCoin() {
+	testing.SetRealm(adminRealm)
+
+	// Deposit already done in main()
+	println("[INFO] approve wugnot and gns for external incentive")
+	wugnot.Approve(cross, stakerAddr, maxInt64)
+	gns.Approve(cross, stakerAddr, depositGnsAmount)
+
+	println("[INFO] create external incentive with ugnot (native coin)")
+	sr.CreateExternalIncentive(
+		cross,
+		"gno.land/r/onbloc/bar:gno.land/r/onbloc/baz:100", // targetPoolPath
+		wugnotPath,                  // rewardToken (wugnot)
+		1_000_000_000,               // rewardAmount (100 ugnot)
+		1234569600,                  // startTimestamp
+		1234569600+TIMESTAMP_90DAYS, // endTimestamp
+	)
+
+	ufmt.Printf("[INFO] native coin external incentive created\n")
+	ufmt.Printf("[INFO] start time: %d, end time: %d\n", 1234569600, 1234569600+TIMESTAMP_90DAYS)
+
+	testing.SkipHeights(1)
+}
+
+func stakeToken01() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve NFT to staker")
+	gnft.Approve(cross, stakerAddr, positionIdFrom(1))
+
+	println("[INFO] stake token 01")
+	sr.StakeToken(cross, 1, "")
+
+	testing.SkipHeights(1)
+}
+
+func collectExternalRewardWithUnwrap() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] skip blocks to accumulate rewards")
+	testing.SkipHeights(900)
+	sr.CollectReward(cross, 1)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] check balances before collecting with unwrap")
+	oldUgnotBal := ugnotBalanceOf(adminAddr)
+	oldWugnotBal := wugnot.BalanceOf(adminAddr)
+
+	ufmt.Printf("[INFO] ugnot balance before: %d\n", oldUgnotBal)
+	ufmt.Printf("[INFO] wugnot balance before: %d\n", oldWugnotBal)
+
+	println("[INFO] collect reward with unwrap=true")
+	sr.CollectReward(cross, 1) // unwrap=true (now transfers WUGNOT)
+
+	newUgnotBal := ugnotBalanceOf(adminAddr)
+	newWugnotBal := wugnot.BalanceOf(adminAddr)
+
+	ufmt.Printf("[EXPECTED] ugnot balance after: %d\n", newUgnotBal)
+	ufmt.Printf("[EXPECTED] wugnot balance after: %d\n", newWugnotBal)
+
+	ugnotChange := newUgnotBal - oldUgnotBal
+	wugnotIncrease := newWugnotBal - oldWugnotBal
+
+	ufmt.Printf("[EXPECTED] ugnot change (should be 0): %d\n", ugnotChange)
+	ufmt.Printf("[EXPECTED] wugnot increase (unwrap now transfers wugnot): %d\n", wugnotIncrease)
+
+	if ugnotChange != 0 {
+		panic("ugnot balance should not change, unwrap now transfers wugnot")
+	}
+
+	if wugnotIncrease <= 0 {
+		panic("should have received wugnot from unwrap")
+	}
+}
+
+func collectExternalRewardWithoutUnwrap() {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] check balances before collecting without unwrap")
+	oldUgnotBal := ugnotBalanceOf(adminAddr)
+	oldWugnotBal := wugnot.BalanceOf(adminAddr)
+
+	ufmt.Printf("[INFO] ugnot balance before: %d\n", oldUgnotBal)
+	ufmt.Printf("[INFO] wugnot balance before: %d\n", oldWugnotBal)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] collect reward with unwrap=false")
+	sr.CollectReward(cross, 1) // unwrap=false
+
+	newUgnotBal := ugnotBalanceOf(adminAddr)
+	newWugnotBal := wugnot.BalanceOf(adminAddr)
+
+	ufmt.Printf("[EXPECTED] ugnot balance after: %d\n", newUgnotBal)
+	ufmt.Printf("[EXPECTED] wugnot balance after: %d\n", newWugnotBal)
+
+	ugnotChange := newUgnotBal - oldUgnotBal
+	wugnotIncrease := newWugnotBal - oldWugnotBal
+
+	ufmt.Printf("[EXPECTED] ugnot change (should be 0): %d\n", ugnotChange)
+	ufmt.Printf("[EXPECTED] wugnot increase (wrapped): %d\n", wugnotIncrease)
+
+	if ugnotChange != 0 {
+		panic("ugnot balance should not change when not unwrapping")
+	}
+
+	if wugnotIncrease <= 0 {
+		panic("should have received wrapped ugnot")
+	}
+}
+
+func ugnotBalanceOf(addr address) uint64 {
+	banker_ := banker.NewBanker(banker.BankerTypeReadonly)
+	coins := banker_.GetCoins(addr)
+	return uint64(coins.AmountOf("ugnot"))
+}
+
+func positionIdFrom(positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize and setup
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create bar:baz:100 pool
+// [INFO] approve gns for pool creation
+// [INFO] create bar:baz:100 pool
+//
+// [SCENARIO] 3. Mint position 01
+// [INFO] approve tokens for minting
+// [INFO] mint position 01 (tick range: -1000 ~ 1000)
+// [EXPECTED] position ID: 1
+// [EXPECTED] liquidity: 2050516
+// [EXPECTED] amount0: 100000, amount1: 100000
+//
+// [SCENARIO] 4. Create external incentive with native coin (ugnot)
+// [INFO] approve wugnot and gns for external incentive
+// [INFO] create external incentive with ugnot (native coin)
+// [INFO] native coin external incentive created
+// [INFO] start time: 1234569600, end time: 1242345600
+//
+// [SCENARIO] 5. Stake token 01
+// [INFO] approve NFT to staker
+// [INFO] stake token 01
+//
+// [SCENARIO] 6. Collect external reward with unwrap
+// [INFO] skip blocks to accumulate rewards
+// [INFO] check balances before collecting with unwrap
+// [INFO] ugnot balance before: 100000000000000
+// [INFO] wugnot balance before: 108288
+// [INFO] collect reward with unwrap=true
+// [EXPECTED] ugnot balance after: 100000000000000
+// [EXPECTED] wugnot balance after: 108479
+// [EXPECTED] ugnot change (should be 0): 0
+// [EXPECTED] wugnot increase (unwrap now transfers wugnot): 191
+//
+// [SCENARIO] 7. Collect external reward without unwrap
+// [INFO] check balances before collecting without unwrap
+// [INFO] ugnot balance before: 100000000000000
+// [INFO] wugnot balance before: 108479
+// [INFO] collect reward with unwrap=false
+// [EXPECTED] ugnot balance after: 100000000000000
+// [EXPECTED] wugnot balance after: 108671
+// [EXPECTED] ugnot change (should be 0): 0
+// [EXPECTED] wugnot increase (wrapped): 192
